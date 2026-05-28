@@ -1,259 +1,279 @@
-# ESP32-CAM Hand Detection Project
+# ESP32-CAM Hand Detection
 
-A real-time hand detection system using **ESP32-CAM** for video streaming and **MediaPipe** on a laptop for computer vision processing. The system detects hands in the video stream and triggers the ESP32-CAM's onboard LED when a hand is detected.
+Real-time hand detection system — ESP32-CAM streams video over Wi-Fi, a laptop runs MediaPipe to count raised fingers, and LEDs light up to match the count. Everything is automatic: the Python script finds the ESP32 on the network by itself.
 
-## Features
+![System Overview](https://img.shields.io/badge/ESP32--CAM-AI--Thinker-blue) ![Python](https://img.shields.io/badge/Python-3.10-green) ![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10.21-orange) ![PlatformIO](https://img.shields.io/badge/PlatformIO-Arduino-purple)
 
-- **ESP32-CAM Video Streaming**: Captures and streams JPEG frames over Wi-Fi
-- **Real-time Hand Detection**: Uses Google MediaPipe for accurate hand tracking
-- **Web Interface**: Flask server provides live video feed with detection overlay
-- **LED Trigger**: ESP32-CAM LED activates when hands are detected
-- **Low Latency**: Optimized for real-time performance
+---
 
-## System Architecture
+## How It Works
 
 ```
-┌─────────────┐  Wi-Fi  ┌──────────────────────────┐
-│ ESP32-CAM   │◄────────┤ Laptop (Python)          │
-│ - Stream    │         │ - Hand Detection         │
-│ - LED       │         │ - Flask Web Server       │
-└─────────────┘         └──────────────────────────┘
+┌──────────────────────────────────┐        ┌──────────────────────────────────────┐
+│  ESP32-CAM                       │        │  Laptop (Python)                     │
+│                                  │◄──────►│                                      │
+│  • MJPEG stream  → /stream       │  WiFi  │  • Auto-detect ESP32 IP              │
+│  • Single frame  → /capture      │        │  • Parse MJPEG, grab latest frame    │
+│  • LED control   → /fingers?n=X  │        │  • MediaPipe hand + finger detection │
+│  • OLED display (SSD1306 I2C)    │        │  • Send n= to ESP32 (async thread)   │
+│  • 3 external LEDs + flash       │        │  • Flask UI at localhost:5000        │
+└──────────────────────────────────┘        └──────────────────────────────────────┘
 ```
 
-## Hardware Requirements
+### Finger → LED Mapping
 
-- **ESP32-CAM** (AI-Thinker module recommended)
-- FTDI Programmer or USB-to-TTL adapter (for initial upload)
-- 5V power supply (USB or external)
-- Computer with Wi-Fi
+| Fingers shown | LEDs on |
+|:---:|---|
+| 0 / no hand | All off |
+| 1 | LED 1 (GPIO12) |
+| 2 | LED 1 + LED 2 (GPIO13) |
+| 3 | LED 1 + LED 2 + LED 3 (GPIO16) |
+| 4 – 5 | LED 1 + LED 2 + LED 3 + onboard flash (GPIO4) |
 
-## Software Requirements
+Closing your fist or moving out of frame turns everything off instantly.
 
-### ESP32-CAM (Firmware)
-- [PlatformIO](https://platformio.org/) (recommended) or Arduino IDE
-- ESP32 board support
+---
 
-### Laptop (Computer Vision)
-- Python 3.8 or higher
-- Libraries (see `laptop/requirements.txt`)
+## Hardware
 
-## Installation & Setup
+### Required
+- **AI-Thinker ESP32-CAM** module
+- **USB-to-TTL adapter** (CH340 or CP2102) — for uploading firmware
+- **SSD1306 OLED display** (0.96", 128×64, I2C) — shows status + finger count
+- **3× LEDs** with **220–330 Ω resistors** in series
+- Jumper wires, breadboard
 
-### Part 1: ESP32-CAM Setup
+### Wiring
 
-#### Option A: Using PlatformIO (Recommended)
+#### OLED (I2C)
+| OLED pin | ESP32-CAM GPIO |
+|----------|---------------|
+| SDA | GPIO **15** |
+| SCL | GPIO **14** |
+| VCC | 3.3 V |
+| GND | GND |
 
-1. **Install PlatformIO**:
-   - [VS Code](https://code.visualstudio.com/) + [PlatformIO IDE Extension](https://platformio.org/install/ide?install=vscode)
-   - Or use PlatformIO CLI
+> ⚠️ Pull-up resistors (4.7 kΩ) on SDA and SCL are required if your OLED module doesn't have them built in.
 
-2. **Configure Wi-Fi Credentials**:
-   Edit `src/main.cpp` and update your Wi-Fi credentials:
-   ```cpp
-   const char* ssid = "YOUR_WIFI_SSID";
-   const char* password = "YOUR_WIFI_PASSWORD";
-   ```
+#### External LEDs
+```
+GPIO12 ──[220Ω]──[LED1 +]──[LED1 -]── GND   (1 finger)
+GPIO13 ──[220Ω]──[LED2 +]──[LED2 -]── GND   (2 fingers)
+GPIO16 ──[220Ω]──[LED3 +]──[LED3 -]── GND   (3 fingers)
+```
+Long leg (anode) → resistor → GPIO. Short leg (cathode) → GND.
 
-3. **Upload to ESP32-CAM**:
+#### Safe GPIO pins on AI-Thinker ESP32-CAM
+| GPIO | Status | Notes |
+|------|--------|-------|
+| 4 | ✅ Output | Onboard white flash LED |
+| 12 | ✅ Output | Safe after boot (strapping pin — avoid pull-ups at power-on) |
+| 13 | ✅ Output | Free |
+| 14 | ✅ I2C SCL | Free |
+| 15 | ✅ I2C SDA | Free |
+| 16 | ✅ Output | Free |
+| 0 | ⚠️ Boot | Keep floating; button to GND for flash mode only |
+| 2 | ⚠️ Strapping | Avoid external pull-ups |
+
+---
+
+## Software Setup
+
+### 1. ESP32 Firmware
+
+**Prerequisites:** VS Code + PlatformIO extension
+
+```bash
+# Clone the repo
+git clone https://github.com/JoelDlima/esp32_project.git
+cd esp32_project
+```
+
+Edit your Wi-Fi credentials in `src/main.cpp`:
+```cpp
+const char* ssid     = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+```
+
+Check your COM port in `platformio.ini`:
+```ini
+upload_port = COM4   ; change to match your USB-to-TTL adapter
+```
+
+**Upload:**
+1. Wire USB-to-TTL: `5V→5V`, `GND→GND`, `TX→U0R`, `RX→U0T`
+2. Bridge **IO0 → GND** (bootloader mode)
+3. Press **RST**
+4. Run upload:
    ```bash
-   # Connect ESP32-CAM via FTDI/USB-TTL to your computer
-   # Put ESP32-CAM in programming mode (connect GPIO0 to GND before power-on)
    pio run --target upload
    ```
+5. Remove IO0–GND bridge, press RST — ESP32 boots and connects to Wi-Fi
 
-4. **Monitor Serial Output**:
-   ```bash
-   pio device monitor -b 115200
-   ```
-   Note down the **IP address** displayed (e.g., `192.168.1.8`)
+### 2. Python Environment (first time only)
 
-#### Option B: Using Arduino IDE
-
-1. **Install ESP32 Board Support**:
-   - Add `https://dl.espressif.com/dl/package_esp32_index.json` to board manager URLs
-   - Install "esp32" by Espressif Systems
-
-2. **Configure Settings**:
-   - Board: "AI Thinker ESP32-CAM"
-   - Upload Speed: 115200
-   - Port: Select your FTDI/USB-TTL port
-
-3. **Update Wi-Fi Credentials** in `esp32cam_test.ino` or `src/main.cpp`
-
-4. **Upload** and note the IP address from Serial Monitor
-
-### Part 2: Laptop Setup
-
-1. **Navigate to laptop directory**:
-   ```bash
-   cd laptop
-   ```
-
-2. **Create virtual environment** (recommended):
-   ```bash
-   python -m venv venv
-   
-   # Windows
-   venv\Scripts\activate
-   
-   # Linux/Mac
-   source venv/bin/activate
-   ```
-
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Configure ESP32-CAM IP**:
-   Edit `laptop/hand_detect.py` and update the IP address:
-   ```python
-   ESP_IP = "192.168.1.8"  # Change to your ESP32-CAM IP
-   ```
-
-## Usage
-
-### Running the System
-
-1. **Power on ESP32-CAM** and ensure it's connected to Wi-Fi
-
-2. **Start the hand detection server**:
-   ```bash
-   cd laptop
-   python hand_detect.py
-   ```
-
-3. **Open web interface**:
-   - Navigate to `http://localhost:5000` in your browser
-   - You should see the live camera feed with hand detection overlay
-
-### What to Expect
-
-- **Green overlay**: Hand(s) detected
-- **ESP32-CAM LED**: Lights up when hand is continuously detected
-- **Console output**: Real-time detection status
-
-### Detection Parameters
-
-You can adjust these in `hand_detect.py`:
-
-```python
-POLL_INTERVAL = 0.3      # Seconds between frame captures
-HAND_HOLDOFF = 0.5       # Time before first LED trigger
-RETRIGGER_AFTER = 1.5    # Re-trigger interval
-LED_ON_DURATION = 2.0    # How long LED stays on
+```bash
+cd laptop
+python -m venv venv
+venv\Scripts\activate        # Windows
+pip install -r requirements.txt
 ```
+
+### 3. Run
+
+**Windows — one click:**
+```
+start.bat      # starts everything + opens browser
+kill.bat       # stops everything
+```
+
+**Manual:**
+```bash
+laptop\venv\Scripts\python.exe laptop\hand_detect.py
+```
+
+Open **http://localhost:5000** in your browser.
+
+---
 
 ## Project Structure
 
 ```
-esp32cam_miniproject/
+esp32_project/
 ├── src/
-│   ├── main.cpp           # ESP32-CAM firmware (PlatformIO)
-│   └── main.cpp.bak       # Backup
+│   └── main.cpp              # ESP32 firmware (C++ / Arduino)
 ├── laptop/
-│   ├── hand_detect.py     # Hand detection + Flask server
-│   └── requirements.txt   # Python dependencies
-├── platformio.ini         # PlatformIO configuration
-├── esp32cam_test.ino      # Arduino IDE sketch (alternative)
-├── start.bat              # Windows batch helper
-├── kill.bat               # Windows batch helper
-└── README.md              # This file
+│   ├── hand_detect.py        # Hand detection + Flask web UI
+│   └── requirements.txt      # Python dependencies
+├── oled_test/                # Standalone OLED wiring test sketch
+├── platformio.ini            # PlatformIO build config
+├── start.bat                 # Windows launch script
+├── kill.bat                  # Windows stop script
+├── ISSUES.md                 # Root-cause analysis of all bugs fixed
+├── DIAGNOSTICS.md            # Serial output guide + component tests
+└── INFO.md                   # Full system documentation
 ```
-
-## Troubleshooting
-
-### ESP32-CAM Issues
-
-**Camera fails to initialize:**
-- Check power supply (ESP32-CAM needs stable 5V, min 500mA)
-- Ensure camera ribbon cable is properly connected
-- Try reducing camera resolution in code
-
-**Can't upload code:**
-- GPIO0 must be connected to GND during upload
-- Disconnect GPIO0 after upload to run normally
-- Check FTDI connections (TX→RX, RX→TX)
-- Reset ESP32-CAM after upload
-
-**WiFi won't connect:**
-- Verify SSID and password
-- Ensure 2.4GHz network (ESP32 doesn't support 5GHz)
-- Check router firewall settings
-
-### Laptop Issues
-
-**Import errors:**
-- Ensure virtual environment is activated
-- Reinstall dependencies: `pip install -r requirements.txt --upgrade`
-
-**Can't connect to ESP32-CAM:**
-- Verify ESP32-CAM IP address
-- Check both devices on same network
-- Ping ESP32-CAM: `ping 192.168.1.x`
-
-**Slow detection:**
-- Reduce frame capture rate (increase `POLL_INTERVAL`)
-- Close other applications
-- Check MediaPipe compatibility with your system
-
-**No web interface:**
-- Ensure port 5000 is not in use
-- Check firewall settings
-- Try `http://127.0.0.1:5000` instead
-
-## Technical Details
-
-### ESP32-CAM Endpoints
-
-- `http://<ESP_IP>/`: Root page with links
-- `http://<ESP_IP>/capture`: Get single JPEG frame
-- `http://<ESP_IP>/stream`: MJPEG stream
-- `http://<ESP_IP>/led`: Trigger onboard LED
-
-### Dependencies
-
-**ESP32 (C++):**
-- esp_camera library
-- WiFi library
-- WebServer library
-
-**Python:**
-- opencv-python: Image processing
-- mediapipe: Hand detection ML model
-- flask: Web server
-- requests: HTTP client
-- numpy: Array operations
-
-## Performance
-
-- **Frame rate**: ~3 FPS (adjustable)
-- **Detection latency**: < 100ms
-- **WiFi range**: Typical 2.4GHz range (10-50m indoors)
-
-## Future Enhancements
-
-- [ ] Gesture recognition (thumbs up, peace sign, etc.)
-- [ ] Multiple camera support
-- [ ] Mobile app interface
-- [ ] Cloud deployment
-- [ ] Recording and playback
-- [ ] Face detection integration
-
-## License
-
-This project is open source and available for educational and personal use.
-
-## Credits
-
-- **ESP32-CAM**: Espressif Systems
-- **MediaPipe**: Google
-- **OpenCV**: Open Source Computer Vision Library
-
-## Contributing
-
-Feel free to submit issues, fork the repository, and create pull requests for any improvements.
 
 ---
 
-**Enjoy building!** 🚀📷✋
+## API Endpoints (ESP32)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Simple HTML page with embedded stream |
+| `/stream` | GET | MJPEG continuous video stream |
+| `/capture` | GET | Single JPEG frame |
+| `/fingers?n=0..5` | GET | Set LED count (0 = all off, 5 = all on + flash) |
+
+Test LEDs directly from a browser:
+```
+http://<ESP32-IP>/fingers?n=1   → LED1 on
+http://<ESP32-IP>/fingers?n=3   → LED1+2+3 on
+http://<ESP32-IP>/fingers?n=0   → all off
+```
+
+---
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| Stream resolution | 640×480 (VGA) |
+| Stream frame rate | ~10–15 fps |
+| Detection resolution | 320×240 (downscaled for speed) |
+| MediaPipe inference | ~80–150 ms / frame |
+| LED response latency | < 200 ms end-to-end |
+| WiFi bandwidth | ~300–500 kbps |
+
+**Key optimisations applied:**
+- `CAMERA_GRAB_LATEST` — always captures the newest frame, never queues stale ones
+- MJPEG parser uses `rfind` — always decodes the freshest frame in the buffer
+- LED HTTP requests run in a fire-and-forget background thread — never block detection
+- `server.handleClient()` called every frame — `/fingers` requests processed within ~100 ms
+- Adaptive frame skipping — skips 1–2 frames when inference is slow to stay real-time
+
+---
+
+## Troubleshooting
+
+### ESP32 won't upload
+| Symptom | Fix |
+|---------|-----|
+| "Connecting..." hangs | Bridge IO0→GND, press RST, then run upload |
+| Wrong COM port | Check Device Manager → Ports |
+| `firmware.bin` locked | Close serial monitor / PlatformIO monitor first |
+
+### OLED stays blank
+| Symptom | Fix |
+|---------|-----|
+| No I2C device found in serial log | Check SDA→GPIO15, SCL→GPIO14, 3.3V, GND |
+| Device found but init fails | Add 4.7 kΩ pull-ups on SDA and SCL |
+| Wrong address | Try 0x3D instead of 0x3C in `main.cpp` |
+
+> **Common mistake:** calling `Wire.setClock()` before `Wire.begin()` — always `begin()` first.
+
+### LEDs don't light up
+| Symptom | Fix |
+|---------|-----|
+| Nothing lights up | Check polarity: long leg → GPIO, short leg → GND |
+| Very dim | Add 220–330 Ω resistor in series |
+| Only onboard flash works | External LEDs need resistors; GPIO12 needs pull-down at boot |
+| Wrong LED lights up | Verify pin numbers match your wiring (GPIO12=LED1, GPIO13=LED2) |
+
+### Video feed laggy / freezing
+| Symptom | Fix |
+|---------|-----|
+| Feed freezes after a few seconds | Restart `start.bat`; check WiFi signal |
+| LEDs respond slowly | Make sure you're running the latest firmware (per-frame `handleClient`) |
+| High latency | Normal for 2.4 GHz WiFi; keep ESP32 and laptop on same router |
+
+### Python errors
+| Error | Fix |
+|-------|-----|
+| `Could not find ESP32-CAM` | ESP32 must be on the same WiFi; close browser tabs to its IP |
+| `mediapipe` import error | Use Python 3.10 exactly; `pip install mediapipe==0.10.21` |
+| Port 5000 in use | Run `kill.bat` or `taskkill /IM python.exe /F` |
+
+---
+
+## Known Issues & Fixes
+
+See **[ISSUES.md](ISSUES.md)** for a full root-cause breakdown of every bug encountered, with code examples and prevention tips for future ESP32-CAM projects. Covers:
+
+- OLED blank (`Wire.setClock` order + swapped SDA/SCL)
+- LEDs not working (strapping pin conflicts on GPIO2/GPIO12)
+- Laggy stream (blocking HTTP calls, stale MJPEG buffer, TCP chunk size)
+- LEDs staying on after hand removed (`last_sent_leds` init bug)
+
+---
+
+## Requirements
+
+**Python** (`laptop/requirements.txt`):
+```
+opencv-python==4.9.0.80
+mediapipe==0.10.21
+requests>=2.31
+flask>=3.0
+numpy>=1.24,<2
+```
+
+**PlatformIO** (`platformio.ini`):
+```ini
+[env:esp32dev]
+platform  = espressif32
+board     = esp32dev
+framework = arduino
+monitor_speed = 115200
+upload_speed  = 115200
+upload_port   = COM4
+lib_deps =
+    adafruit/Adafruit SSD1306 @ ^2.5.10
+    adafruit/Adafruit GFX Library @ ^1.11.9
+```
+
+---
+
+## License
+
+Open source — free for personal and educational use.

@@ -1,5 +1,5 @@
-opencv-python>=4.8
-mediapipe==0.10.14
+opencv-python==4.9.0.80
+mediapipe==0.10.21
 requests>=2.31
 flask>=3.0
-numpy>=1.24
+numpy>=1.24,<2
