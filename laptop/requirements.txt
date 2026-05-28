@@ -1,5 +1,11 @@
+# Core – always required
 opencv-python==4.9.0.80
 mediapipe==0.10.21
 requests>=2.31
 flask>=3.0
 numpy>=1.24,<2
+
+# Optional – GPU acceleration (RTX 3050 / any CUDA 11.x+ GPU)
+# Install this to enable ONNX+CUDA backend (~10x faster inference):
+#   pip install onnxruntime-gpu
+# onnxruntime-gpu>=1.17
