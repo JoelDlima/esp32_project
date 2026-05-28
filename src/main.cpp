@@ -7,8 +7,11 @@
   • LEDs on GPIO12/13/16 + onboard flash GPIO4
   • OLED SSD1306 on SDA=GPIO15, SCL=GPIO14
 
-  NEW in this version:
+  Features:
   ┌─────────────────────────────────────────────────────┐
+  │ • OTA updates: flash new firmware over WiFi,        │
+  │   no USB adapter needed after first flash           │
+  │   Password: "CHANGE_ME_OTA_PASSWORD"  (change before deploying)   │
   │ • Watchdog: if no /fingers request for 5 s,         │
   │   all LEDs turn off automatically                   │
   │ • Rich OLED layout:                                 │
@@ -16,7 +19,7 @@
   │   - Row 1: finger count + bar graph                 │
   │   - Row 2: stream FPS                               │
   │   - Row 3: WiFi RSSI + uptime                       │
-  │   - Row 4: watchdog countdown                       │
+  │   - Row 4: watchdog countdown / OTA progress        │
   └─────────────────────────────────────────────────────┘
 
   PIN NOTES (AI-Thinker ESP32-CAM):
@@ -31,6 +34,7 @@
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ArduinoOTA.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -46,6 +50,12 @@ Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 // ── Wi-Fi ─────────────────────────────────────────────────────────────────────
 const char* ssid     = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_SSIDdlima";
+
+// ── OTA ───────────────────────────────────────────────────────────────────────
+// Change this password before deploying in a shared environment.
+// Upload via OTA:  pio run --target upload  (with upload_protocol = espota in platformio.ini)
+#define OTA_PASSWORD  "CHANGE_ME_OTA_PASSWORD"
+#define OTA_HOSTNAME  "esp32-cam"
 
 // ── LED pins ──────────────────────────────────────────────────────────────────
 //   GPIO12 → LED1  (1 finger)
@@ -87,6 +97,9 @@ bool          watchdog_fired  = false;
 
 // Stream FPS tracking (updated by stream handler, read by OLED)
 volatile float stream_fps     = 0.0f;
+
+// OTA progress (0 = idle, 1-100 = in progress, shown on OLED row 4)
+volatile int   ota_progress   = -1;   // -1 = not active
 
 WebServer server(80);
 void startCameraServer();
@@ -180,21 +193,32 @@ void oled_update() {
     display.print("s");
   }
 
-  // ── Row 4: watchdog status ────────────────────────────────────────────
+  // ── Row 4: watchdog status / OTA progress ────────────────────────────
   display.setCursor(0, 50);
-  unsigned long now = millis();
-  unsigned long elapsed = now - last_fingers_ms;
-  if (watchdog_fired) {
+  if (ota_progress >= 0) {
+    // OTA in progress – show a progress bar
+    display.print("OTA:");
+    int bar_w = 90;
+    int filled = (bar_w * ota_progress) / 100;
+    display.drawRect(28, 51, bar_w, 7, WHITE);
+    if (filled > 0) display.fillRect(28, 51, filled, 7, WHITE);
+    display.setCursor(120, 50);
+    display.print(ota_progress);
+  } else if (watchdog_fired) {
     display.print("WDG: FIRED - LEDs off");
-  } else if (elapsed < WATCHDOG_MS) {
-    unsigned long remaining_ms = WATCHDOG_MS - elapsed;
-    display.print("WDG: ");
-    display.print(remaining_ms / 1000);
-    display.print(".");
-    display.print((remaining_ms % 1000) / 100);
-    display.print("s");
   } else {
-    display.print("WDG: OK");
+    unsigned long now2 = millis();
+    unsigned long elapsed2 = now2 - last_fingers_ms;
+    if (elapsed2 < WATCHDOG_MS) {
+      unsigned long remaining_ms = WATCHDOG_MS - elapsed2;
+      display.print("WDG: ");
+      display.print(remaining_ms / 1000);
+      display.print(".");
+      display.print((remaining_ms % 1000) / 100);
+      display.print("s");
+    } else {
+      display.print("WDG: OK");
+    }
   }
 
   display.display();
@@ -346,6 +370,49 @@ void setup() {
   Serial.printf("[WIFI] IP: %s\n", ip.c_str());
   oled_boot("WiFi OK", ip, "/stream");
 
+  // ── OTA ──────────────────────────────────────────────────────────────────
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+
+  ArduinoOTA.onStart([]() {
+    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "firmware" : "filesystem";
+    Serial.println("[OTA] Starting update: " + type);
+    ota_progress = 0;
+    // Turn off LEDs during OTA – don't want them stuck on if update fails
+    setLedCount(0);
+    oled_boot("OTA Update", "Starting...");
+  });
+
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\n[OTA] Complete – rebooting");
+    ota_progress = 100;
+    oled_boot("OTA Done", "Rebooting...");
+    delay(500);
+  });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    int pct = (progress * 100) / total;
+    ota_progress = pct;
+    if (pct % 10 == 0) {
+      Serial.printf("[OTA] %d%%\n", pct);
+    }
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("[OTA] ERROR %u: ", error);
+    if      (error == OTA_AUTH_ERROR)    Serial.println("Auth failed");
+    else if (error == OTA_BEGIN_ERROR)   Serial.println("Begin failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive failed");
+    else if (error == OTA_END_ERROR)     Serial.println("End failed");
+    ota_progress = -1;
+    oled_boot("OTA ERROR", "Check serial");
+  });
+
+  ArduinoOTA.begin();
+  Serial.printf("[OTA] Ready  hostname=%s  password=%s\n", OTA_HOSTNAME, OTA_PASSWORD);
+  Serial.printf("[OTA] Upload via: pio run --target upload  (espota protocol)\n");
+
   startCameraServer();
 
   // Seed the watchdog so it doesn't fire immediately on boot
@@ -359,6 +426,7 @@ void setup() {
 // loop – runs watchdog check + OLED refresh every 500 ms
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
+  ArduinoOTA.handle();   // must be called every loop – listens for OTA upload
   server.handleClient();
 
   static unsigned long last_oled_ms = 0;
