@@ -49,7 +49,7 @@ Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 
 // ── Wi-Fi ─────────────────────────────────────────────────────────────────────
 const char* ssid     = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_SSIDdlima";
+const char* password = "YOUR_WIFI_PASSWORD";
 
 // ── OTA ───────────────────────────────────────────────────────────────────────
 // Change this password before deploying in a shared environment.
